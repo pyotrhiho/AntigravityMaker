@@ -1,8 +1,26 @@
 use hecs::World;
-use crate::components::{Position, Velocity, AiState, LodLevel};
+use crate::components::{Position, Velocity, AiState, LodLevel, Speed};
 
 pub fn simulate_ai(world: &mut World, dt: f32) {
-    for (_id, (pos, vel, ai, lod)) in world.query_mut::<(&mut Position, &mut Velocity, &mut AiState, &LodLevel)>() {
+    // First, let's collect the components we need and default speed if Speed component is not present
+    let mut speeds = Vec::new();
+    for (id, (_pos, _vel, _ai, _lod)) in world.query_mut::<(&Position, &Velocity, &AiState, &LodLevel)>() {
+        speeds.push(id);
+    }
+
+    for id in speeds {
+        let speed = if let Ok(mut q) = world.query_one::<&Speed>(id) {
+            if let Some(s) = q.get() {
+                s.0
+            } else {
+                5.0
+            }
+        } else {
+            5.0 // Default speed
+        };
+
+        if let Ok(mut q) = world.query_one::<(&mut Position, &mut Velocity, &mut AiState, &LodLevel)>(id) {
+        if let Some((pos, vel, ai, lod)) = q.get() {
         match lod {
             LodLevel::Active => {
                 // Precise pathfinding and collision avoidance for active entities
@@ -13,8 +31,8 @@ pub fn simulate_ai(world: &mut World, dt: f32) {
                     
                     if dist > 1.0 {
                         // Normalize and apply speed
-                        vel.x = (dx / dist) * 5.0; // Assume base speed 5.0
-                        vel.y = (dy / dist) * 5.0;
+                        vel.x = (dx / dist) * speed;
+                        vel.y = (dy / dist) * speed;
                     } else {
                         vel.x = 0.0;
                         vel.y = 0.0;
@@ -31,8 +49,8 @@ pub fn simulate_ai(world: &mut World, dt: f32) {
                     let dist = (dx * dx + dy * dy).sqrt();
                     
                     if dist > 1.0 {
-                        vel.x = (dx / dist) * 5.0;
-                        vel.y = (dy / dist) * 5.0;
+                        vel.x = (dx / dist) * speed;
+                        vel.y = (dy / dist) * speed;
                     } else {
                         vel.x = 0.0;
                         vel.y = 0.0;
@@ -57,6 +75,8 @@ pub fn simulate_ai(world: &mut World, dt: f32) {
         if *lod != LodLevel::Background {
             pos.x += vel.x * dt;
             pos.y += vel.y * dt;
+        }
+        }
         }
     }
 }

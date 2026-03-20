@@ -22,3 +22,6 @@ pub enum LodLevel {
     Simulated,
     Background,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Speed(pub f32);
