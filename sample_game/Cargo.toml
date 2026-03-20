@@ -1,0 +1,10 @@
+[package]
+name = "sample_game"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+game_engine = { path = "../game_engine" }
+hecs = "0.10.5"
+macroquad = "0.4.14"
+rand = "0.10.0"
