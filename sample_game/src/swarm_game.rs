@@ -4,9 +4,19 @@ use macroquad::prelude::*;
 
 // --- Custom Components ---
 struct Player;
+struct PlayerState {
+    hp: f32,
+    max_hp: f32,
+    stamina: f32,
+    max_stamina: f32,
+    stun_timer: f32,
+    knockback_vel: Vec2,
+}
+
 struct Enemy {
     hp: i32,
     hit_cooldown: f32,
+    knockback_power: f32,
 }
 struct Spear {
     start: Vec2,
@@ -15,6 +25,7 @@ struct Spear {
     damage: i32,
 }
 struct Lifetime(f32);
+struct Hamburger;
 struct JumpState {
     is_jumping: bool,
     timer: f32,
@@ -26,6 +37,14 @@ struct JumpState {
 fn spawn_player(world: &mut World) -> Entity {
     world.spawn((
         Player,
+        PlayerState {
+            hp: 100.0,
+            max_hp: 100.0,
+            stamina: 100.0,
+            max_stamina: 100.0,
+            stun_timer: 0.0,
+            knockback_vel: vec2(0.0, 0.0),
+        },
         Position {
             x: screen_width() / 2.0,
             y: screen_height() / 2.0,
@@ -59,7 +78,7 @@ fn spawn_enemy(world: &mut World, player_pos: Vec2, current_enemy_speed: f32) {
     }
 
     world.spawn((
-        Enemy { hp: 2, hit_cooldown: 0.0 },
+        Enemy { hp: 2, hit_cooldown: 0.0, knockback_power: 300.0 },
         Position { x, y },
         Velocity { x: 0.0, y: 0.0 },
         Speed(current_enemy_speed),
@@ -82,33 +101,49 @@ fn quantize_direction_8way(dir: Vec2) -> Vec2 {
     vec2(snapped_angle.cos(), snapped_angle.sin())
 }
 
-fn handle_input(world: &mut World, player_pos: Vec2, is_jumping: bool) {
-    if is_mouse_button_pressed(MouseButton::Left) {
-        let mouse_pos = mouse_position();
-        let mouse_vec = vec2(mouse_pos.0, mouse_pos.1);
-        
-        let mut dir = mouse_vec - player_pos;
-        if dir.length_squared() > 0.0 {
-            dir = dir.normalize();
-            // Snap attack direction to nearest 8-way for grid-like feel
-            dir = quantize_direction_8way(dir);
-        } else {
-            dir = vec2(1.0, 0.0);
-        }
-        
-        let spear_length = if is_jumping { 200.0 } else { 150.0 };
-        let end_pos = player_pos + dir * spear_length;
-        let damage = if is_jumping { 2 } else { 1 };
+fn handle_input(world: &mut World, player_entity: Entity, player_pos: Vec2, is_jumping: bool) {
+    let mut attack_dir = vec2(0.0, 0.0);
+    let mut pressed_attack = false;
 
-        world.spawn((
-            Spear {
-                start: player_pos,
-                end: end_pos,
-                hit_radius: if is_jumping { 40.0 } else { 20.0 },
-                damage,
-            },
-            Lifetime(0.2),
-        ));
+    if is_key_down(KeyCode::I) { attack_dir.y -= 1.0; pressed_attack |= is_key_pressed(KeyCode::I); }
+    if is_key_down(KeyCode::K) { attack_dir.y += 1.0; pressed_attack |= is_key_pressed(KeyCode::K); }
+    if is_key_down(KeyCode::J) { attack_dir.x -= 1.0; pressed_attack |= is_key_pressed(KeyCode::J); }
+    if is_key_down(KeyCode::L) { attack_dir.x += 1.0; pressed_attack |= is_key_pressed(KeyCode::L); }
+
+    if pressed_attack {
+        let mut can_attack = false;
+        
+        if let Ok(mut query) = world.query_one::<&mut PlayerState>(player_entity) {
+            if let Some(p_state) = query.get() {
+                if p_state.stamina >= 20.0 {
+                    p_state.stamina -= 20.0;
+                    can_attack = true;
+                }
+            }
+        }
+
+        if can_attack {
+            if attack_dir.length_squared() > 0.0 {
+                attack_dir = attack_dir.normalize();
+                attack_dir = quantize_direction_8way(attack_dir);
+            } else {
+                attack_dir = vec2(1.0, 0.0); // default if pressed somehow cancels out
+            }
+
+            let spear_length = if is_jumping { 200.0 } else { 150.0 };
+            let end_pos = player_pos + attack_dir * spear_length;
+            let damage = if is_jumping { 2 } else { 1 };
+
+            world.spawn((
+                Spear {
+                    start: player_pos,
+                    end: end_pos,
+                    hit_radius: if is_jumping { 40.0 } else { 20.0 },
+                    damage,
+                },
+                Lifetime(0.2),
+            ));
+        }
     }
 }
 
@@ -153,12 +188,30 @@ pub async fn play_swarm_game() {
 
         let mut player_pos = vec2(0.0, 0.0);
         let mut is_jumping = false;
+        let mut player_hp = 0.0;
+        let mut player_max_hp = 0.0;
+        let mut player_stamina = 0.0;
+        let mut player_max_stamina = 0.0;
+        let mut player_is_stunned = false;
 
-        if let Ok(mut query) = world.query_one::<(&mut Position, &mut JumpState)>(player_entity) {
-            if let Some((pos, jump)) = query.get() {
+        if let Ok(mut query) = world.query_one::<(&mut Position, &mut JumpState, &mut PlayerState)>(player_entity) {
+            if let Some((pos, jump, p_state)) = query.get() {
+                // Recover stamina
+                p_state.stamina += 20.0 * dt;
+                if p_state.stamina > p_state.max_stamina {
+                    p_state.stamina = p_state.max_stamina;
+                }
+
                 let mut move_dir = vec2(0.0, 0.0);
 
-                if jump.is_jumping {
+                if p_state.stun_timer > 0.0 {
+                    // Stunned: apply knockback and prevent other actions
+                    p_state.stun_timer -= dt;
+                    pos.x += p_state.knockback_vel.x * dt;
+                    pos.y += p_state.knockback_vel.y * dt;
+                    p_state.knockback_vel *= 0.9; // decay knockback
+                    player_is_stunned = true;
+                } else if jump.is_jumping {
                     // In mid-air: move according to inertia, cannot change direction
                     pos.x += jump.momentum.x * 200.0 * dt;
                     pos.y += jump.momentum.y * 200.0 * dt;
@@ -193,7 +246,22 @@ pub async fn play_swarm_game() {
 
                 player_pos = vec2(pos.x, pos.y);
                 is_jumping = jump.is_jumping;
+                player_hp = p_state.hp;
+                player_max_hp = p_state.max_hp;
+                player_stamina = p_state.stamina;
+                player_max_stamina = p_state.max_stamina;
             }
+        }
+
+        // Check for game over
+        if player_hp <= 0.0 {
+            clear_background(BLACK);
+            let text = format!("GAME OVER - Score: {}", score);
+            let text_dim = measure_text(&text, None, 40, 1.0);
+            draw_text(&text, screen_width() / 2.0 - text_dim.width / 2.0, screen_height() / 2.0, 40.0, RED);
+            draw_text("Press ESC to return", screen_width() / 2.0 - 100.0, screen_height() / 2.0 + 40.0, 20.0, WHITE);
+            next_frame().await;
+            continue;
         }
 
         enemy_spawn_timer += dt;
@@ -202,11 +270,40 @@ pub async fn play_swarm_game() {
             enemy_spawn_timer = 0.0;
         }
 
-        handle_input(&mut world, player_pos, is_jumping);
+        if !player_is_stunned {
+            handle_input(&mut world, player_entity, player_pos, is_jumping);
+        }
 
         for (_, (ai, speed, _enemy)) in world.query_mut::<(&mut AiState, &mut Speed, &Enemy)>() {
             ai.target = Some(Position { x: player_pos.x, y: player_pos.y });
             speed.0 = current_enemy_speed; // Also update existing enemies' speed to match elapsed time
+        }
+
+        // Enemy collision with player
+        if !player_is_stunned {
+            let mut hit_knockback = None;
+            for (_, (e_pos, enemy)) in world.query_mut::<(&Position, &Enemy)>() {
+                let e_vec = vec2(e_pos.x, e_pos.y);
+                if (e_vec - player_pos).length() < 35.0 { // Player radius 20 + Enemy radius 15
+                    let mut kb_dir = player_pos - e_vec;
+                    if kb_dir.length_squared() == 0.0 {
+                        kb_dir = vec2(1.0, 0.0);
+                    }
+                    kb_dir = kb_dir.normalize();
+                    hit_knockback = Some(kb_dir * enemy.knockback_power);
+                    break; // Take hit from one enemy per frame
+                }
+            }
+
+            if let Some(kb) = hit_knockback {
+                if let Ok(mut query) = world.query_one::<&mut PlayerState>(player_entity) {
+                    if let Some(p_state) = query.get() {
+                        p_state.hp -= 10.0;
+                        p_state.knockback_vel = kb;
+                        p_state.stun_timer = 0.3; // 0.3 seconds of stun
+                    }
+                }
+            }
         }
 
         game_engine::systems::simulate_ai(&mut world, dt);
@@ -231,6 +328,7 @@ pub async fn play_swarm_game() {
             spears.push((spear.start, spear.end, spear.hit_radius, spear.damage));
         }
 
+        let mut hamburgers_to_spawn = Vec::new();
         for (enemy_id, (enemy_pos, enemy)) in world.query_mut::<(&Position, &mut Enemy)>() {
             let e_pos = vec2(enemy_pos.x, enemy_pos.y);
             let mut hit_this_frame = false;
@@ -247,9 +345,44 @@ pub async fn play_swarm_game() {
             if hit_this_frame && enemy.hp <= 0 {
                 to_despawn.push(enemy_id);
                 score += 1;
+
+                // Drop Hamburger (1% chance)
+                if rand::gen_range(0, 100) == 0 {
+                    hamburgers_to_spawn.push(Position { x: e_pos.x, y: e_pos.y });
+                }
             }
         }
 
+        for pos in hamburgers_to_spawn {
+            world.spawn((
+                Hamburger,
+                pos,
+            ));
+        }
+
+        let mut hamburgers_to_despawn = Vec::new();
+        if !player_is_stunned {
+            let mut heal_amount = 0.0;
+            for (h_id, (h_pos, _hamburger)) in world.query_mut::<(&Position, &Hamburger)>() {
+                let h_vec = vec2(h_pos.x, h_pos.y);
+                if (h_vec - player_pos).length() < 30.0 { // Player radius 20 + Hamburger radius 10
+                    hamburgers_to_despawn.push(h_id);
+                    heal_amount += 10.0; // Heal amount will be 10% of max_hp (which is 100), so 10.0. Calculate per burger.
+                }
+            }
+            if heal_amount > 0.0 {
+                if let Ok(mut query) = world.query_one::<&mut PlayerState>(player_entity) {
+                    if let Some(p_state) = query.get() {
+                        p_state.hp += heal_amount;
+                        if p_state.hp > p_state.max_hp {
+                            p_state.hp = p_state.max_hp;
+                        }
+                    }
+                }
+            }
+        }
+
+        to_despawn.extend(hamburgers_to_despawn);
         to_despawn.sort();
         to_despawn.dedup();
         for id in to_despawn {
@@ -271,13 +404,28 @@ pub async fn play_swarm_game() {
             draw_circle(pos.x, pos.y, 15.0, color);
         }
 
+        for (_, (pos, _hamburger)) in world.query_mut::<(&Position, &Hamburger)>() {
+            draw_circle(pos.x, pos.y, 10.0, ORANGE);
+        }
+
         for (_, (spear,)) in world.query_mut::<(&Spear,)>() {
             draw_line(spear.start.x, spear.start.y, spear.end.x, spear.end.y, 8.0, YELLOW);
         }
 
         draw_text(&format!("Score: {}", score), 20.0, 40.0, 30.0, WHITE);
-        draw_text("WASD to move, Click to Attack", 20.0, 80.0, 20.0, LIGHTGRAY);
-        draw_text("Press ESC to return to Menu", 20.0, 110.0, 20.0, ORANGE);
+
+        // Draw HP Bar
+        draw_rectangle(20.0, 60.0, 200.0, 20.0, DARKGRAY);
+        draw_rectangle(20.0, 60.0, 200.0 * (player_hp / player_max_hp).clamp(0.0, 1.0), 20.0, RED);
+        draw_text(&format!("HP: {}/{}", player_hp as i32, player_max_hp as i32), 25.0, 75.0, 20.0, WHITE);
+
+        // Draw Stamina Bar
+        draw_rectangle(20.0, 90.0, 200.0, 15.0, DARKGRAY);
+        draw_rectangle(20.0, 90.0, 200.0 * (player_stamina / player_max_stamina).clamp(0.0, 1.0), 15.0, GREEN);
+        draw_text(&format!("Stamina: {}/{}", player_stamina as i32, player_max_stamina as i32), 25.0, 102.0, 15.0, WHITE);
+
+        draw_text("WASD to move, I/J/K/L to Attack", 20.0, 140.0, 20.0, LIGHTGRAY);
+        draw_text("Press ESC to return to Menu", 20.0, 170.0, 20.0, ORANGE);
 
         next_frame().await;
     }
