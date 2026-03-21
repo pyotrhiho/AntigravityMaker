@@ -58,7 +58,7 @@ fn spawn_player(world: &mut World) -> Entity {
     ))
 }
 
-fn spawn_enemy(world: &mut World, player_pos: Vec2, current_enemy_speed: f32) {
+fn spawn_enemy(world: &mut World, player_pos: Vec2, current_enemy_speed: f32, enemy_hp: i32) {
     let mut x = 0.0;
     let mut y = 0.0;
 
@@ -78,7 +78,7 @@ fn spawn_enemy(world: &mut World, player_pos: Vec2, current_enemy_speed: f32) {
     }
 
     world.spawn((
-        Enemy { hp: 2, hit_cooldown: 0.0, knockback_power: 300.0 },
+        Enemy { hp: enemy_hp, hit_cooldown: 0.0, knockback_power: 300.0 },
         Position { x, y },
         Velocity { x: 0.0, y: 0.0 },
         Speed(current_enemy_speed),
@@ -166,6 +166,11 @@ pub async fn play_swarm_game() {
     let mut world = World::new();
     let player_entity = spawn_player(&mut world);
     
+    let stage_clear_tex = load_texture("assets/stage_clear.jpeg").await;
+    let mut current_stage = 1;
+    let mut stage_kills = 0;
+    let mut showing_stage_clear = false;
+
     let mut enemy_spawn_timer = 0.0;
     let mut score = 0;
     let mut elapsed_time = 0.0;
@@ -184,7 +189,9 @@ pub async fn play_swarm_game() {
         // Initial speed: 10.0.
         // Also: gradually accelerate enemies over time.
         // Let's add 1.0 to speed every 10 seconds.
-        let mut current_enemy_speed = 10.0 + (elapsed_time / 10.0) * 1.0;
+        let stage_multiplier = 1.3_f32.powi(current_stage - 1);
+        let current_enemy_speed = (10.0 + (elapsed_time / 10.0) * 1.0) * stage_multiplier;
+        let current_enemy_hp = (2.0 * stage_multiplier).round() as i32;
 
         let mut player_pos = vec2(0.0, 0.0);
         let mut is_jumping = false;
@@ -253,6 +260,72 @@ pub async fn play_swarm_game() {
             }
         }
 
+        // Stage clear logic
+        if stage_kills >= 30 {
+            showing_stage_clear = true;
+        }
+
+        if showing_stage_clear {
+            clear_background(BLACK);
+            if let Ok(tex) = &stage_clear_tex {
+                // draw texture centered and scaled
+                let scale = (screen_width() / tex.width()).min(screen_height() / tex.height());
+                let w = tex.width() * scale;
+                let h = tex.height() * scale;
+                draw_texture_ex(
+                    tex,
+                    screen_width() / 2.0 - w / 2.0,
+                    screen_height() / 2.0 - h / 2.0,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(w, h)),
+                        ..Default::default()
+                    },
+                );
+            }
+
+            let text = format!("STAGE {} CLEAR!", current_stage);
+            let text_dim = measure_text(&text, None, 50, 1.0);
+            draw_text(&text, screen_width() / 2.0 - text_dim.width / 2.0, screen_height() / 2.0, 50.0, YELLOW);
+
+            let press_text = "Press SPACE to start next stage";
+            let press_dim = measure_text(press_text, None, 30, 1.0);
+            draw_text(press_text, screen_width() / 2.0 - press_dim.width / 2.0, screen_height() / 2.0 + 60.0, 30.0, WHITE);
+
+            if is_key_pressed(KeyCode::Space) {
+                current_stage += 1;
+                stage_kills = 0;
+                showing_stage_clear = false;
+
+                // Clear all enemies, spears, hamburgers
+                let mut all_to_despawn = Vec::new();
+                for (id, _) in world.query_mut::<&Enemy>() {
+                    all_to_despawn.push(id);
+                }
+                for (id, _) in world.query_mut::<&Spear>() {
+                    all_to_despawn.push(id);
+                }
+                for (id, _) in world.query_mut::<&Hamburger>() {
+                    all_to_despawn.push(id);
+                }
+                for id in all_to_despawn {
+                    let _ = world.despawn(id);
+                }
+
+                // Heal player slightly on stage clear
+                if let Ok(mut query) = world.query_one::<&mut PlayerState>(player_entity) {
+                    if let Some(p_state) = query.get() {
+                        p_state.hp += 30.0;
+                        if p_state.hp > p_state.max_hp {
+                            p_state.hp = p_state.max_hp;
+                        }
+                    }
+                }
+            }
+            next_frame().await;
+            continue;
+        }
+
         // Check for game over
         if player_hp <= 0.0 {
             clear_background(BLACK);
@@ -266,7 +339,7 @@ pub async fn play_swarm_game() {
 
         enemy_spawn_timer += dt;
         if enemy_spawn_timer > 0.5 {
-            spawn_enemy(&mut world, player_pos, current_enemy_speed);
+            spawn_enemy(&mut world, player_pos, current_enemy_speed, current_enemy_hp);
             enemy_spawn_timer = 0.0;
         }
 
@@ -345,6 +418,7 @@ pub async fn play_swarm_game() {
             if hit_this_frame && enemy.hp <= 0 {
                 to_despawn.push(enemy_id);
                 score += 1;
+                stage_kills += 1;
 
                 // Drop Hamburger (1% chance)
                 if rand::gen_range(0, 100) == 0 {
@@ -400,7 +474,17 @@ pub async fn play_swarm_game() {
         }
 
         for (_, (pos, enemy)) in world.query_mut::<(&Position, &Enemy)>() {
-            let color = if enemy.hp == 2 { RED } else { PINK };
+            let max_hp_this_stage = (2.0 * 1.3_f32.powi(current_stage - 1)).round() as i32;
+            let hp_ratio = enemy.hp as f32 / max_hp_this_stage as f32;
+            let color = if enemy.hit_cooldown > 0.0 {
+                WHITE
+            } else if hp_ratio > 0.6 {
+                RED
+            } else if hp_ratio > 0.3 {
+                ORANGE
+            } else {
+                PINK
+            };
             draw_circle(pos.x, pos.y, 15.0, color);
         }
 
@@ -413,6 +497,8 @@ pub async fn play_swarm_game() {
         }
 
         draw_text(&format!("Score: {}", score), 20.0, 40.0, 30.0, WHITE);
+        draw_text(&format!("Stage: {}", current_stage), screen_width() - 150.0, 40.0, 30.0, YELLOW);
+        draw_text(&format!("Kills: {}/30", stage_kills), screen_width() - 150.0, 70.0, 20.0, LIGHTGRAY);
 
         // Draw HP Bar
         draw_rectangle(20.0, 60.0, 200.0, 20.0, DARKGRAY);
